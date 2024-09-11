@@ -1,64 +1,190 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
+import { createClient } from '@supabase/supabase-js'
+import AddTaskModal from './AddTaskModal'
+import TaskDetail from './TaskDetail'
 
-interface Post {
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error('Missing Supabase environment variables')
+}
+
+const supabase = createClient(supabaseUrl, supabaseAnonKey)
+
+interface Task {
   id: number;
   title: string;
   content: string;
   created_at: string;
+  due_date: string | null;
+  parent_id: number | null;
+  subtasks?: Task[];
 }
 
-interface TaskListProps {
-  posts: Post[];
+interface NewTask {
+  title: string;
+  content: string;
+  due_date: string | null;
+  parent_id: number | null;
 }
 
-export default function TaskList({ posts }: TaskListProps) {
-  const today = new Date().toDateString()
-  const thisWeek = new Date()
-  thisWeek.setDate(thisWeek.getDate() + 7)
+export default function TaskList() {
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null)
 
-  const todayPosts = posts.filter(post => new Date(post.created_at).toDateString() === today)
-  const thisWeekPosts = posts.filter(post => {
-    const postDate = new Date(post.created_at)
-    return postDate > new Date(today) && postDate <= thisWeek
-  })
-  const laterPosts = posts.filter(post => new Date(post.created_at) > thisWeek)
+  useEffect(() => {
+    fetchTasks()
+  }, [])
 
-  const TaskGroup = ({ title, posts }: { title: string; posts: Post[] }) => {
-    const [isOpen, setIsOpen] = useState(true)
+  const fetchTasks = async () => {
+    const { data, error } = await supabase
+      .from('posts')
+      .select('*')
+      .order('created_at', { ascending: false })
 
-    return (
-      <div className="mb-4">
-        <h2 
-          className="text-lg font-semibold mb-2 flex items-center text-white cursor-pointer"
-          onClick={() => setIsOpen(!isOpen)}
-        >
-          <svg 
-            xmlns="http://www.w3.org/2000/svg" 
-            className={`h-5 w-5 mr-2 text-white transition-transform ${isOpen ? 'transform rotate-0' : 'transform rotate-180'}`} 
-            viewBox="0 0 20 20" 
-            fill="currentColor"
-          >
-            <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-          </svg>
-          {title}
-        </h2>
-        {isOpen && posts.map((post) => (
-          <div key={post.id} className="bg-gray-100 p-4 rounded mb-2">
-            <h3 className="font-bold text-black">{post.title}</h3>
-            <p className="text-black">{post.content}</p>
-          </div>
-        ))}
-      </div>
-    )
+    if (error) {
+      console.error('Error fetching tasks:', error)
+    } else {
+      const tasksWithSubtasks = buildTaskHierarchy(data || [])
+      setTasks(tasksWithSubtasks)
+    }
   }
 
+  const buildTaskHierarchy = (flatTasks: Task[]): Task[] => {
+    const taskMap = new Map<number, Task>()
+    const rootTasks: Task[] = []
+
+    flatTasks.forEach(task => {
+      taskMap.set(task.id, { ...task, subtasks: [] })
+    })
+
+    flatTasks.forEach(task => {
+      if (task.parent_id) {
+        const parentTask = taskMap.get(task.parent_id)
+        if (parentTask) {
+          parentTask.subtasks?.push(taskMap.get(task.id)!)
+        }
+      } else {
+        rootTasks.push(taskMap.get(task.id)!)
+      }
+    })
+
+    return rootTasks
+  }
+
+  const addTask = async (newTask: NewTask): Promise<Task> => {
+    const { data, error } = await supabase
+      .from('posts')
+      .insert([{ ...newTask, created_at: new Date().toISOString() }])
+      .select()
+
+    if (error) {
+      console.error('Error adding task:', error)
+      throw error
+    } else {
+      await fetchTasks()
+      return data[0]
+    }
+  }
+
+  const updateTask = async (updatedTask: Partial<Task>) => {
+    const { error } = await supabase
+      .from('posts')
+      .update(updatedTask)
+      .eq('id', updatedTask.id)
+
+    if (error) {
+      console.error('Error updating task:', error)
+    } else {
+      await fetchTasks()
+      if (selectedTask && selectedTask.id === updatedTask.id) {
+        setSelectedTask(prev => prev ? { ...prev, ...updatedTask } : null)
+      }
+    }
+  }
+
+  const deleteTask = async (taskId: number) => {
+    const { error } = await supabase
+      .from('posts')
+      .delete()
+      .eq('id', taskId)
+
+    if (error) {
+      console.error('Error deleting task:', error)
+    } else {
+      await fetchTasks()
+      setSelectedTask(null)
+    }
+  }
+
+  const moveTask = async (taskId: number, newParentId: number) => {
+    const { error } = await supabase
+      .from('posts')
+      .update({ parent_id: newParentId })
+      .eq('id', taskId)
+
+    if (error) {
+      console.error('Error moving task:', error)
+    } else {
+      await fetchTasks()
+    }
+  }
+
+  const renderTask = (task: Task, level: number = 0) => (
+    <div key={task.id} className={`ml-${level * 4}`}>
+      <div
+        className="bg-gray-800 p-4 rounded-lg flex items-center cursor-pointer mb-2"
+        onClick={() => setSelectedTask(task)}
+      >
+        <div className="flex-grow">
+          <h3 className="text-lg font-semibold text-white">{task.title}</h3>
+        </div>
+        <div className="text-sm text-gray-400">
+          {task.due_date && `Due: ${new Date(task.due_date).toLocaleDateString()}`}
+        </div>
+      </div>
+      {task.subtasks && task.subtasks.map(subtask => renderTask(subtask, level + 1))}
+    </div>
+  )
+
   return (
-    <div>
-      <TaskGroup title="今日" posts={todayPosts} />
-      <TaskGroup title="今週" posts={thisWeekPosts} />
-      <TaskGroup title="後で" posts={laterPosts} />
+    <div className="flex h-screen bg-gray-900">
+      <div className="flex-1 bg-gray-900 p-6 overflow-auto">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-2xl font-bold text-white">All issues</h2>
+          <button
+            onClick={() => setIsModalOpen(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+          >
+            Add Task
+          </button>
+        </div>
+        <div className="space-y-2">
+          {tasks.map(task => renderTask(task))}
+        </div>
+      </div>
+
+      <AddTaskModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onAddTask={addTask}
+        parentTasks={tasks}
+      />
+      {selectedTask && (
+        <TaskDetail
+          task={selectedTask}
+          allTasks={tasks}
+          onClose={() => setSelectedTask(null)}
+          onUpdate={updateTask}
+          onDelete={deleteTask}
+          onAddSubtask={addTask}
+          onMoveTask={moveTask}
+        />
+      )}
     </div>
   )
 }
